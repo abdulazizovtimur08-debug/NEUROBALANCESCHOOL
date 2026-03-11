@@ -1,0 +1,162 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ──────────────────────────────────────────────────────────────
+    // Helper functions
+    // ──────────────────────────────────────────────────────────────
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function getUser() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function hasRole(role) {
+      return isAuthenticated() && getUser().role == role;
+    }
+
+    function isAdmin() {
+      return hasRole('admin');
+    }
+
+    function isPsychologist() {
+      return hasRole('psychologist');
+    }
+
+    function isDirector() {
+      return hasRole('director');
+    }
+
+    function sameSchool(resourceSchoolId) {
+      return isAuthenticated() && getUser().schoolId == resourceSchoolId;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // Schools
+    // ──────────────────────────────────────────────────────────────
+    match /schools/{schoolId} {
+      allow read: if isAuthenticated() && getUser().schoolId == schoolId;
+      allow write: if isAdmin() && getUser().schoolId == schoolId;
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // Users
+    // ──────────────────────────────────────────────────────────────
+    match /users/{userId} {
+      allow read: if isAuthenticated() && (
+        request.auth.uid == userId ||
+        (sameSchool(resource.data.schoolId) && (isPsychologist() || isAdmin()))
+      );
+      allow create: if isAdmin();
+      allow update: if isOwner(userId) || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // Screening Results
+    // ──────────────────────────────────────────────────────────────
+    match /screeningResults/{resultId} {
+      // Owner can read their own (if not anonymous)
+      // Psychologist can read results of their school clients
+      // Director CANNOT read individual results
+      allow read: if isAuthenticated() && (
+        (!resource.data.isAnonymous && isOwner(resource.data.userId)) ||
+        (sameSchool(resource.data.schoolId) && isPsychologist()) ||
+        isAdmin()
+      );
+      allow create: if isAuthenticated() && sameSchool(request.resource.data.schoolId);
+      allow update: if false; // screening results are immutable
+      allow delete: if isAdmin();
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // Help Requests
+    // ──────────────────────────────────────────────────────────────
+    match /helpRequests/{requestId} {
+      allow read: if isAuthenticated() && (
+        (!resource.data.isAnonymous && isOwner(resource.data.authorId)) ||
+        (sameSchool(resource.data.schoolId) && (isPsychologist() || isAdmin()))
+      );
+      allow create: if isAuthenticated() && sameSchool(request.resource.data.schoolId);
+      allow update: if isAuthenticated() && (
+        (sameSchool(resource.data.schoolId) && (isPsychologist() || isAdmin()))
+      );
+      allow delete: if isAdmin();
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // Appointments
+    // ──────────────────────────────────────────────────────────────
+    match /appointments/{appointmentId} {
+      allow read: if isAuthenticated() && (
+        isOwner(resource.data.studentId) ||
+        isOwner(resource.data.psychologistId) ||
+        isAdmin()
+      );
+      allow create: if isAuthenticated() && (isPsychologist() || isAdmin());
+      allow update: if isAuthenticated() && (
+        isOwner(resource.data.psychologistId) ||
+        isOwner(resource.data.studentId) || // for cancel
+        isAdmin()
+      );
+      allow delete: if isAdmin();
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // Session Notes – STRICTLY PRIVATE
+    // Director, student, staff CANNOT read these
+    // ──────────────────────────────────────────────────────────────
+    match /sessionNotes/{noteId} {
+      allow read: if isAuthenticated() && (
+        isOwner(resource.data.psychologistId) ||
+        isAdmin()
+      );
+      allow create: if isAuthenticated() && isPsychologist();
+      allow update: if isAuthenticated() && (
+        isOwner(resource.data.psychologistId) || isAdmin()
+      );
+      allow delete: if isAdmin();
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // Feedback
+    // ──────────────────────────────────────────────────────────────
+    match /feedback/{feedbackId} {
+      allow read: if isAuthenticated() && (
+        isOwner(resource.data.psychologistId) || // psychologist sees own feedback
+        (!resource.data.isAnonymous && isOwner(resource.data.authorId)) ||
+        isAdmin()
+      );
+      allow create: if isAuthenticated();
+      allow update: if false; // feedback is immutable
+      allow delete: if isAdmin();
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // Notifications
+    // ──────────────────────────────────────────────────────────────
+    match /notifications/{notificationId} {
+      allow read: if isAuthenticated() && isOwner(resource.data.recipientId);
+      allow update: if isAuthenticated() && isOwner(resource.data.recipientId); // mark as read
+      allow create: if false; // Cloud Functions only
+      allow delete: if isAuthenticated() && isOwner(resource.data.recipientId);
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // School KPIs – Director and Admin only
+    // ──────────────────────────────────────────────────────────────
+    match /schoolKPIs/{kpiId} {
+      allow read: if isAuthenticated() && (
+        sameSchool(resource.data.schoolId) && (isDirector() || isAdmin())
+      );
+      allow write: if false; // Cloud Functions only
+    }
+  }
+}
